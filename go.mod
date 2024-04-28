@@ -2,14 +2,21 @@ module github.com/braheezy/gowl
 
 go 1.21.9
 
-require github.com/rajveermalviya/go-wayland/wayland v0.0.0-20230130181619-0ad78d1310b2
+require (
+	github.com/charmbracelet/log v0.4.0
+	github.com/rajveermalviya/go-wayland/wayland v0.0.0-20230130181619-0ad78d1310b2
+	golang.org/x/sys v0.13.0
+)
 
 require (
-	github.com/google/go-cmp v0.5.8 // indirect
-	github.com/iancoleman/strcase v0.2.0 // indirect
-	github.com/rajveermalviya/go-wayland/cmd/go-wayland-scanner v0.0.0-20230130181619-0ad78d1310b2 // indirect
-	golang.org/x/mod v0.7.0 // indirect
-	golang.org/x/sys v0.4.0 // indirect
-	golang.org/x/tools v0.5.0 // indirect
-	mvdan.cc/gofumpt v0.4.0 // indirect
+	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
+	github.com/charmbracelet/lipgloss v0.10.0 // indirect
+	github.com/go-logfmt/logfmt v0.6.0 // indirect
+	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
+	github.com/mattn/go-isatty v0.0.18 // indirect
+	github.com/mattn/go-runewidth v0.0.15 // indirect
+	github.com/muesli/reflow v0.3.0 // indirect
+	github.com/muesli/termenv v0.15.2 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
 )

@@ -1,8 +1,9 @@
 package main
 
 import (
-	"log"
 	"syscall"
+
+	"github.com/charmbracelet/log"
 
 	"github.com/rajveermalviya/go-wayland/wayland/client"
 )

@@ -1,24 +1,45 @@
 package main
 
 import (
-	"log"
 	"log/syslog"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/charmbracelet/log"
+
 	"github.com/rajveermalviya/go-wayland/wayland/client"
+	xdg_shell "github.com/rajveermalviya/go-wayland/wayland/stable/xdg-shell"
+	xdg_activation "github.com/rajveermalviya/go-wayland/wayland/staging/xdg-activation-v1"
+	primary_selection "github.com/rajveermalviya/go-wayland/wayland/unstable/primary-selection-v1"
 	"golang.org/x/sys/unix"
 )
 
+type Config struct {
+	HasXdgShell            bool
+	HasWpPrimarySelection  bool
+	HasGtkPrimarySelection bool
+	HasWlrDataControl      bool
+	HasGtkShell            bool
+	HasXdgActivation       bool
+}
+
 type App struct {
-	registry      *client.Registry
-	compositor    *client.Compositor
-	display       *client.Display
-	shm           *client.Shm
-	shell         *client.Shell
-	deviceManager *client.DataDeviceManager
-	seat          *client.Seat
+	registry                         *client.Registry
+	compositor                       *client.Compositor
+	display                          *client.Display
+	shm                              *client.Shm
+	shell                            *client.Shell
+	deviceManager                    *client.DataDeviceManager
+	seats                            []*client.Seat
+	seat                             *client.Seat
+	config                           *Config
+	xdgActivation                    *xdg_activation.Activation
+	xdgWmBase                        *xdg_shell.WmBase
+	gtkShell1                        *GtkShell1
+	gtkPrimarySelectionDeviceManager *GtkPrimarySelectionDeviceManager
+	zwpPrimarySelectionDeviceManager *primary_selection.PrimarySelectionDeviceManager
+	zwlrDataControlManager           *ZwlrDataControlManagerV1
 }
 
 func checkClosedStdio() {
@@ -38,14 +59,14 @@ func checkClosedStdio() {
 	// Check if stderr is directed to a character device
 	stat, err := os.Stderr.Stat()
 	if err == nil && (stat.Mode()&os.ModeCharDevice) != 0 {
-		log.Println(message)
+		log.Printf("%s\n", message)
 		os.Exit(1)
 	}
 
 	// Maybe there is a tty we could write to?
 	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0666); err == nil {
 		defer tty.Close()
-		log.New(tty, "", 0).Println(message)
+		log.New(tty).Printf("%s\n", message)
 		os.Exit(1)
 	}
 
@@ -72,25 +93,82 @@ func main() {
 	display, err := client.Connect("")
 	if err != nil {
 		log.Fatalf("Failed to connect to Wayland display: %v", err)
+		// TODO: complain_about_wayland_connection()
 	}
 
 	checkClosedStdio()
 
+	app := App{
+		display: display,
+	}
 	registry, err := display.GetRegistry()
 	if err != nil {
 		log.Fatalf("Failed to get registry: %v", err)
 	}
-	app := App{
-		registry: registry,
-		display:  display,
-	}
-
-	// Setup global handler
+	app.registry = registry
 	app.registry.SetGlobalHandler(app.HandleRegistryGlobal)
 
+	// Wait for the initial set of globals to appear
 	app.displayRoundTrip()
 
-	println("all interfaces registered")
+	seat := app.findRegistrySeat()
+
+	deviceManager := app.findDeviceManager(true)
+	if deviceManager == nil {
+		// TODO: complain_about_selection_support
+		log.Info("No suitable device manager found for the requested selection mode.")
+	}
+	switch dm := deviceManager.(type) {
+	case *ZwlrDataControlManagerV1:
+		device, err := dm.GetDataDevice(seat)
+		if err != nil {
+			log.Fatalf("Failed to get data device: %v", err)
+		}
+		device.SetSelectionHandler(func(event ZwlrDataControlDeviceV1SelectionEvent) {
+
+		})
+	}
+
+}
+
+func (app *App) findRegistrySeat() *client.Seat {
+	app.displayRoundTrip()
+	//TODO: If option `--seat` is supported, this is where it would be found and set
+
+	return app.seat
+}
+
+func (app *App) findDeviceManager(primary bool) interface{} {
+	/* For regular selection, we just look at the two supported
+	 * protocols. We prefer wlr-data-control, as it doesn't require
+	 * us to use the popup surface hack.
+	 */
+	if !primary {
+		if app.config.HasWlrDataControl {
+			return app.zwlrDataControlManager
+		}
+		return app.deviceManager
+	} else {
+		/* For primary selection, it's a bit more complicated. We also
+		 * prefer wlr-data-control, but we don't know in advance whether
+		 * the compositor supports primary selection, as unlike with
+		 * other protocols here, the mere presence of wlr-data-control
+		 * does not imply primary selection support. However, we assume
+		 * that if a compositor supports primary selection at all, then
+		 * if it supports wlr-data-control v2 it also supports primary
+		 * selection over wlr-data-control; which is only reasonable.
+		 */
+		if app.config.HasWlrDataControl && app.zwlrDataControlManager.Version >= 2 {
+			return app.zwlrDataControlManager
+		}
+		if app.config.HasWpPrimarySelection {
+			return app.zwpPrimarySelectionDeviceManager
+		}
+		if app.config.HasGtkPrimarySelection {
+			return app.gtkPrimarySelectionDeviceManager
+		}
+		return nil
+	}
 }
 
 func (app *App) displayRoundTrip() {
@@ -101,7 +179,7 @@ func (app *App) displayRoundTrip() {
 	}
 	defer func() {
 		if err2 := callback.Destroy(); err2 != nil {
-			log.Println("unable to destroy callback: ", err2)
+			log.Printf("unable to destroy callback: %v\n", err2)
 		}
 	}()
 
@@ -124,44 +202,113 @@ func (app *App) dispatch() {
 	app.display.Context().Dispatch()
 }
 
+func HandleSeatName(e client.SeatNameEvent) {
+	log.Printf("seat name: %v", e.Name)
+}
+
 func (app *App) HandleRegistryGlobal(event client.RegistryGlobalEvent) {
+	log.Debugf("discovered an interface: %q", event.Interface)
 	switch event.Interface {
 	case "wl_compositor":
-		compositor := client.NewCompositor(app.context())
-		err := app.registry.Bind(event.Name, event.Interface, event.Version, compositor)
-		if err != nil {
-			log.Fatalf("unable to bind wl_compositor interface: %v", err)
+		if event.Version > 2 {
+			compositor := client.NewCompositor(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, compositor)
+			if err != nil {
+				log.Fatalf("unable to bind wl_compositor interface: %v", err)
+			}
+			app.compositor = compositor
 		}
-		app.compositor = compositor
 	case "wl_shm":
-		shm := client.NewShm(app.context())
-		err := app.registry.Bind(event.Name, event.Interface, event.Version, shm)
-		if err != nil {
-			log.Fatalf("unable to bind wl_shm interface: %v", err)
+		if event.Version > 1 {
+			shm := client.NewShm(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, shm)
+			if err != nil {
+				log.Fatalf("unable to bind wl_shm interface: %v", err)
+			}
+			app.shm = shm
 		}
-		app.shm = shm
 	case "wl_shell":
-		shell := client.NewShell(app.context())
-		err := app.registry.Bind(event.Name, event.Interface, event.Version, shell)
-		if err != nil {
-			log.Fatalf("unable to bind wl_shell interface: %v", err)
+		if event.Version > 1 {
+			shell := client.NewShell(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, shell)
+			if err != nil {
+				log.Fatalf("unable to bind wl_shell interface: %v", err)
+			}
+			app.shell = shell
 		}
-		app.shell = shell
-
 	case "wl_data_device_manager":
-		deviceManager := client.NewDataDeviceManager(app.context())
-		err := app.registry.Bind(event.Name, event.Interface, event.Version, deviceManager)
-		if err != nil {
-			log.Fatalf("unable to bind wl_data_device_manager interface: %v", err)
+		if event.Version > 1 {
+			deviceManager := client.NewDataDeviceManager(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, deviceManager)
+			if err != nil {
+				log.Fatalf("unable to bind wl_data_device_manager interface: %v", err)
+			}
+			app.deviceManager = deviceManager
 		}
-		app.deviceManager = deviceManager
 	case "wl_seat":
-		seat := client.NewSeat(app.context())
-		err := app.registry.Bind(event.Name, event.Interface, event.Version, seat)
-		if err != nil {
-			log.Fatalf("unable to bind wl_seat interface: %v", err)
+		if event.Version >= 2 {
+			seat := client.NewSeat(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, seat)
+			if err != nil {
+				log.Fatalf("unable to bind wl_seat interface: %v", err)
+			}
+			seat.SetNameHandler(HandleSeatName)
+			app.seat = seat
+			app.seats = append(app.seats, seat)
 		}
-		app.seat = seat
+
+	case "zwp_primary_selection_device_manager_v1":
+		if event.Version > 1 {
+			zwpPrimarySelectionDeviceManager := primary_selection.NewPrimarySelectionDeviceManager(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, zwpPrimarySelectionDeviceManager)
+			if err != nil {
+				log.Fatalf("unable to bind zwp_primary_selection_device_manager_v1 interface: %v", err)
+			}
+			app.zwpPrimarySelectionDeviceManager = zwpPrimarySelectionDeviceManager
+			app.config.HasWpPrimarySelection = true
+		}
+	case "xdg_activation_v1":
+		if event.Version >= 1 {
+			xdgActivation := xdg_activation.NewActivation(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, xdgActivation)
+			if err != nil {
+				log.Fatalf("unable to bind xdg_activation_v1 interface: %v", err)
+			}
+			app.xdgActivation = xdgActivation
+			app.config.HasXdgActivation = true
+		}
+	case "gtk_primary_selection_device_manager":
+		if event.Version > 1 {
+			gtkPrimarySelectionDeviceManager := NewGtkPrimarySelectionDeviceManager(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, gtkPrimarySelectionDeviceManager)
+			if err != nil {
+				log.Fatalf("unable to bind gtk_primary_selection_device_manager interface: %v", err)
+			}
+			app.gtkPrimarySelectionDeviceManager = gtkPrimarySelectionDeviceManager
+			app.config.HasGtkPrimarySelection = true
+		}
+	case "zwlr_data_control_manager_v1":
+
+		zwlrDataControlManager := NewZwlrDataControlManagerV1(app.context())
+		err := app.registry.Bind(event.Name, event.Interface, event.Version, zwlrDataControlManager)
+		if err != nil {
+			log.Fatalf("unable to bind zwlr_data_control_manager_v1 interface: %v", err)
+		}
+		zwlrDataControlManager.Version = event.Version
+		app.zwlrDataControlManager = zwlrDataControlManager
+		app.config.HasWlrDataControl = true
+	case "gtk_shell1":
+		if event.Version > 4 {
+			gtkShell1 := NewGtkShell1(app.context())
+			err := app.registry.Bind(event.Name, event.Interface, event.Version, gtkShell1)
+			if err != nil {
+				log.Fatalf("unable to bind gtk_shell1 interface: %v", err)
+			}
+			app.gtkShell1 = gtkShell1
+			app.config.HasGtkShell = true
+		}
+	case "xdg_wm_base":
+		app.config.HasXdgShell = true
 
 	}
 }
