@@ -24,19 +24,28 @@ type Config struct {
 	HasXdgActivation       bool
 }
 
+type Options struct {
+	primary bool
+}
+
 type App struct {
-	registry                         *client.Registry
-	compositor                       *client.Compositor
-	display                          *client.Display
-	shm                              *client.Shm
-	shell                            *client.Shell
-	deviceManager                    *client.DataDeviceManager
-	seats                            []*client.Seat
-	seat                             *client.Seat
-	config                           *Config
-	xdgActivation                    *xdg_activation.Activation
-	xdgWmBase                        *xdg_shell.WmBase
-	gtkShell1                        *GtkShell1
+	registry      *client.Registry
+	compositor    *client.Compositor
+	display       *client.Display
+	shm           *client.Shm
+	shell         *client.Shell
+	seats         []*client.Seat
+	seat          *client.Seat
+	config        *Config
+	xdgActivation *xdg_activation.Activation
+	xdgWmBase     *xdg_shell.WmBase
+	gtkShell1     *GtkShell1
+	// clipboardDevice                  ClipboardDevice
+	options       *Options
+	deviceManager GenericDeviceManager
+	device        GenericDevice
+	// supportsSelection                bool
+	dataDeviceManager                *client.DataDeviceManager
 	gtkPrimarySelectionDeviceManager *GtkPrimarySelectionDeviceManager
 	zwpPrimarySelectionDeviceManager *primary_selection.PrimarySelectionDeviceManager
 	zwlrDataControlManager           *ZwlrDataControlManagerV1
@@ -100,7 +109,11 @@ func main() {
 
 	app := App{
 		display: display,
+		options: &Options{},
+		// clipboardDevice: &ClipboardDevice{},
+		config: &Config{},
 	}
+	app.options.primary = false
 	registry, err := display.GetRegistry()
 	if err != nil {
 		log.Fatalf("Failed to get registry: %v", err)
@@ -113,22 +126,16 @@ func main() {
 
 	seat := app.findRegistrySeat()
 
-	deviceManager := app.findDeviceManager(true)
+	deviceManager := app.findDeviceManager()
 	if deviceManager == nil {
 		// TODO: complain_about_selection_support
 		log.Info("No suitable device manager found for the requested selection mode.")
 	}
-	switch dm := deviceManager.(type) {
-	case *ZwlrDataControlManagerV1:
-		device, err := dm.GetDataDevice(seat)
-		if err != nil {
-			log.Fatalf("Failed to get data device: %v", err)
-		}
-		device.SetSelectionHandler(func(event ZwlrDataControlDeviceV1SelectionEvent) {
-
-		})
+	device, err := deviceManager.GetDataDevice(seat)
+	if err != nil {
+		log.Fatalf("Failed to get data device: %v", err)
 	}
-
+	device.SelectionCallback()
 }
 
 func (app *App) findRegistrySeat() *client.Seat {
@@ -138,16 +145,16 @@ func (app *App) findRegistrySeat() *client.Seat {
 	return app.seat
 }
 
-func (app *App) findDeviceManager(primary bool) interface{} {
+func (app *App) findDeviceManager() GenericDeviceManager {
 	/* For regular selection, we just look at the two supported
 	 * protocols. We prefer wlr-data-control, as it doesn't require
 	 * us to use the popup surface hack.
 	 */
-	if !primary {
+	if !app.options.primary {
 		if app.config.HasWlrDataControl {
-			return app.zwlrDataControlManager
+			return &ZwlrDataControlDeviceManager{app.zwlrDataControlManager}
 		}
-		return app.deviceManager
+		return &DataDeviceManager{app.dataDeviceManager}
 	} else {
 		/* For primary selection, it's a bit more complicated. We also
 		 * prefer wlr-data-control, but we don't know in advance whether
@@ -158,15 +165,15 @@ func (app *App) findDeviceManager(primary bool) interface{} {
 		 * if it supports wlr-data-control v2 it also supports primary
 		 * selection over wlr-data-control; which is only reasonable.
 		 */
-		if app.config.HasWlrDataControl && app.zwlrDataControlManager.Version >= 2 {
-			return app.zwlrDataControlManager
-		}
-		if app.config.HasWpPrimarySelection {
-			return app.zwpPrimarySelectionDeviceManager
-		}
-		if app.config.HasGtkPrimarySelection {
-			return app.gtkPrimarySelectionDeviceManager
-		}
+		// if app.config.HasWlrDataControl && app.zwlrDataControlManager.Version >= 2 {
+		// 	return app.zwlrDataControlManager
+		// }
+		// if app.config.HasWpPrimarySelection {
+		// 	return app.zwpPrimarySelectionDeviceManager
+		// }
+		// if app.config.HasGtkPrimarySelection {
+		// 	return app.gtkPrimarySelectionDeviceManager
+		// }
 		return nil
 	}
 }
@@ -219,7 +226,7 @@ func (app *App) HandleRegistryGlobal(event client.RegistryGlobalEvent) {
 			app.compositor = compositor
 		}
 	case "wl_shm":
-		if event.Version > 1 {
+		if event.Version >= 1 {
 			shm := client.NewShm(app.context())
 			err := app.registry.Bind(event.Name, event.Interface, event.Version, shm)
 			if err != nil {
@@ -243,7 +250,7 @@ func (app *App) HandleRegistryGlobal(event client.RegistryGlobalEvent) {
 			if err != nil {
 				log.Fatalf("unable to bind wl_data_device_manager interface: %v", err)
 			}
-			app.deviceManager = deviceManager
+			app.dataDeviceManager = deviceManager
 		}
 	case "wl_seat":
 		if event.Version >= 2 {
@@ -258,7 +265,7 @@ func (app *App) HandleRegistryGlobal(event client.RegistryGlobalEvent) {
 		}
 
 	case "zwp_primary_selection_device_manager_v1":
-		if event.Version > 1 {
+		if event.Version >= 1 {
 			zwpPrimarySelectionDeviceManager := primary_selection.NewPrimarySelectionDeviceManager(app.context())
 			err := app.registry.Bind(event.Name, event.Interface, event.Version, zwpPrimarySelectionDeviceManager)
 			if err != nil {
@@ -278,7 +285,7 @@ func (app *App) HandleRegistryGlobal(event client.RegistryGlobalEvent) {
 			app.config.HasXdgActivation = true
 		}
 	case "gtk_primary_selection_device_manager":
-		if event.Version > 1 {
+		if event.Version >= 1 {
 			gtkPrimarySelectionDeviceManager := NewGtkPrimarySelectionDeviceManager(app.context())
 			err := app.registry.Bind(event.Name, event.Interface, event.Version, gtkPrimarySelectionDeviceManager)
 			if err != nil {
