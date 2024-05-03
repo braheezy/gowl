@@ -41,7 +41,6 @@ import (
 // controls.
 type ZwlrDataControlManagerV1 struct {
 	client.BaseProxy
-	Version uint32
 }
 
 // NewZwlrDataControlManagerV1 : manager to control data devices

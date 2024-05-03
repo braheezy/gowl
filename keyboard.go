@@ -1,54 +1,38 @@
 package main
 
 import (
-	"syscall"
+	"log"
 
-	"github.com/charmbracelet/log"
-
-	"github.com/rajveermalviya/go-wayland/wayland/client"
+	"github.com/neurlang/wayland/wl"
 )
 
-type Keyboard struct {
-	Proxy   *client.Keyboard
-	OnFocus func(kb *Keyboard, serial uint32)
-	Data    interface{}
+func (app *appState) HandleKeyboardEnter(wl.KeyboardEnterEvent) {
+	app.pointerEvent.eventMask &= ^keyboardEventLeave
+	app.pointerEvent.eventMask |= keyboardEventEnter
+
+	app.redecorate(true)
+
 }
 
-func NewKeyboard(proxy *client.Keyboard) *Keyboard {
-	kb := &Keyboard{Proxy: proxy}
-	kb.init()
-	return kb
-}
+func (app *appState) HandleKeyboardLeave(wl.KeyboardLeaveEvent) {
+	app.pointerEvent.eventMask &= ^keyboardEventEnter
+	app.pointerEvent.eventMask |= keyboardEventLeave
 
-func (kb *Keyboard) init() {
-	kb.Proxy.SetKeymapHandler(kb.keymapHandler)
-	kb.Proxy.SetEnterHandler(kb.enterHandler)
-	kb.Proxy.SetLeaveHandler(kb.leaveHandler)
-	kb.Proxy.SetKeyHandler(kb.keyHandler)
-	kb.Proxy.SetModifiersHandler(kb.modifiersHandler)
-}
+	app.redecorate(false)
 
-func (kb *Keyboard) keymapHandler(event client.KeyboardKeymapEvent) {
-	// Close the file descriptor immediately to prevent resource leaks
-	if err := syscall.Close(int(event.Fd)); err != nil {
-		log.Printf("Failed to close file descriptor: %v", err)
+	app.pointerEvent.moveWindow = false
+
+}
+func (app *appState) attachKeyboard() {
+	keyboard, err := app.seat.GetKeyboard()
+	if err != nil {
+		log.Fatal("unable to register keyboard interface")
 	}
-}
+	app.keyboard = keyboard
 
-func (kb *Keyboard) enterHandler(event client.KeyboardEnterEvent) {
-	if kb.OnFocus != nil {
-		kb.OnFocus(kb, event.Serial)
-	}
-}
+	keyboard.AddKeyHandler(app)
+	keyboard.AddEnterHandler(app)
+	keyboard.AddLeaveHandler(app)
 
-func (kb *Keyboard) leaveHandler(event client.KeyboardLeaveEvent) {
-	// Optionally handle leave events
-}
-
-func (kb *Keyboard) keyHandler(event client.KeyboardKeyEvent) {
-	// Handle key press or release
-}
-
-func (kb *Keyboard) modifiersHandler(event client.KeyboardModifiersEvent) {
-	// Handle modifier keys
+	log.Print("keyboard interface registered")
 }
